@@ -1,0 +1,26 @@
+{
+  "name": "skilitlab",
+  "version": "0.1.0",
+  "private": true,
+  "description": "skilitlab — 个人学习全栈平台（Nuxt 3 + NestJS + Prisma + PostgreSQL monorepo）",
+  "packageManager": "pnpm@11.22.0",
+  "engines": {
+    "node": ">=20.19"
+  },
+  "scripts": {
+    "dev": "pnpm --parallel --filter @skilitlab/web --filter @skilitlab/api dev",
+    "dev:web": "pnpm --filter @skilitlab/web dev",
+    "dev:api": "pnpm --filter @skilitlab/api dev",
+    "build": "pnpm --filter @skilitlab/api build && pnpm --filter @skilitlab/web build",
+    "build:web": "pnpm --filter @skilitlab/web build",
+    "build:api": "pnpm --filter @skilitlab/api build",
+    "prisma:generate": "pnpm --filter @skilitlab/api prisma:generate",
+    "prisma:migrate": "pnpm --filter @skilitlab/api prisma:migrate",
+    "prisma:seed": "pnpm --filter @skilitlab/api prisma:seed",
+    "db:up": "docker compose up -d postgres",
+    "db:down": "docker compose down",
+    "up": "docker compose up -d --build",
+    "down": "docker compose down",
+    "logs": "docker compose logs -f"
+  }
+}

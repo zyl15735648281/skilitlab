@@ -1,0 +1,39 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+/// 学习笔记元数据（正文在 packages/content 的 markdown 里，这里是可搜索/可统计的索引）
+model Note {
+  id        Int      @id @default(autoincrement())
+  slug      String   @unique
+  title     String
+  date      DateTime
+  track     String
+  tags      String[]
+  level     Int
+  summary   String?
+  source    String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+/// 做过的项目（对应 /project 卡片）
+model Project {
+  id          Int      @id @default(autoincrement())
+  slug        String   @unique
+  name        String
+  description String
+  stack       String[]
+  status      String   @default("active")
+  repo        String?
+  demo        String?
+  docs        String?
+  order       Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}

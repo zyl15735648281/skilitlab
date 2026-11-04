@@ -1,0 +1,36 @@
+{
+  "name": "你的名字",
+  "title": "高级前端 / 全栈工程师",
+  "summary": "这是一份示例简历数据，用来验证 /interview 3D 简历页。把这里替换成你自己的真实信息即可。",
+  "skills": ["Vue 3", "Nuxt", "TypeScript", "Node.js", "NestJS", "React", "Three.js", "GIS / Cesium"],
+  "experience": [
+    {
+      "company": "示例公司 A",
+      "role": "高级前端工程师",
+      "period": "2023.01 - 至今",
+      "highlights": ["主导微前端架构升级", "页面 LCP 从 3.8s 优化到 1.1s"]
+    },
+    {
+      "company": "示例公司 B",
+      "role": "前端工程师",
+      "period": "2021.07 - 2022.12",
+      "highlights": ["三维 GIS 可视化平台开发", "封装组件库提升团队效率"]
+    }
+  ],
+  "featuredProjects": [
+    {
+      "slug": "skilitlab",
+      "name": "skilitlab",
+      "description": "学习记录 + 3D 简历 + 项目展示",
+      "stack": ["Nuxt 3", "NestJS", "PostgreSQL"],
+      "status": "active",
+      "demo": "https://www.skilitlab.top",
+      "order": 1
+    }
+  ],
+  "contact": {
+    "email": "you@example.com",
+    "github": "https://github.com/<your-account>",
+    "site": "https://www.skilitlab.top"
+  }
+}
