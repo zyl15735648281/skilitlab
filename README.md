@@ -80,7 +80,9 @@ pnpm dev
 
 ---
 
-## 三、生产部署（腾讯云 / 自建服务器）
+## 三、手动部署（腾讯云 / 自建服务器，不用 CI 的备选）
+
+> 想「以后只更新内容、自动上线」，直接用下面的 [四、CI/CD 自动部署](#四cicd-自动部署以后只需更新内容)；本节是手动部署的备选路径。
 
 ### 0. 前置（一次性，不阻塞写代码）
 
@@ -147,13 +149,75 @@ curl http://localhost/api/projects
 
 ---
 
-## 四、后续演进（先留口子，现在不做）
+## 四、CI/CD 自动部署（以后只需更新内容）
+
+目标是：**你改 markdown / 代码 → `git push` → 服务器自动更新，全程不用登录服务器。**
+
+### 流程
+
+```
+push main → GitHub Actions 构建镜像（web + api）→ 推送到 GHCR → SSH 到服务器 → pull 镜像 + 重启
+```
+
+工作流文件在 [.github/workflows/deploy.yml](./.github/workflows/deploy.yml)，也支持在 Actions 页面手动触发（workflow_dispatch）。
+
+### 4.1 一次性准备
+
+1. **服务器生成 SSH 密钥**，供 GitHub Actions 免密登录：
+   ```bash
+   ssh-keygen -t ed25519 -C "deploy"        # 一路回车
+   cat ~/.ssh/id_ed25519.pub >> ~/.ssh/authorized_keys   # 公钥留在服务器
+   cat ~/.ssh/id_ed25519                      # 私钥内容，下一步要用
+   ```
+   > 建议用独立用户 `deploy` 而不是 root；安全组记得放行 22。
+
+2. **在 GitHub 仓库加 Secrets**（Settings → Secrets and variables → Actions → New repository secret）：
+
+   | 名称 | 值 |
+   |---|---|
+   | `SERVER_HOST` | 服务器公网 IP |
+   | `SERVER_USER` | SSH 登录用户（如 `deploy` 或 `root`） |
+   | `SERVER_SSH_KEY` | 上一步的私钥内容（整段粘贴） |
+   | `SERVER_PORT` | 可选，默认 22 |
+
+3. **让服务器能拉 GHCR 镜像**（二选一）：
+   - **推荐：镜像设公开**。GitHub → 头像 → Packages → 找到 `skilitlab-api` 和 `skilitlab-web` → Package settings → Change visibility → Public。之后 `docker pull` 无需登录。
+   - 或**保持私有**：在服务器上一次性登录 `docker login ghcr.io -u <你的用户名>`，输入带 `read:packages` 权限的 PAT。
+
+4. **服务器首次部署**（等第一次 CI 跑完、镜像已生成后执行）：
+   ```bash
+   git clone git@github.com:<你>/skilitlab.git ~/skilitlab
+   cd ~/skilitlab
+   cp .env.example .env && vim .env    # 改 POSTGRES_PASSWORD、GITHUB_OWNER（小写）
+   docker compose -f docker-compose.prod.yml up -d
+   docker compose -f docker-compose.prod.yml exec api pnpm prisma:seed   # 灌示例数据
+   ```
+
+### 4.2 日常更新（核心体验）
+
+改任意 markdown（如 `packages/content/notes/*.md`）或代码后：
+
+```bash
+git add -A && git commit -m "note: 新增 xxx 笔记" && git push
+```
+
+GitHub Actions 自动构建 → 推送镜像 → 服务器自动 pull + 重启。等 2–4 分钟，刷新 `https://www.skilitlab.top/learning` 即见新内容。
+
+> 也可以直接在 GitHub 网页上改 markdown 文件并 commit，同样触发部署，连终端都不用开。
+
+### 4.3 回滚
+
+CI 会同时打 `:latest` 和 `:<commit-sha>` 两个 tag。要回滚：把 [docker-compose.prod.yml](./docker-compose.prod.yml) 里 `:latest` 临时改成某个 `:<sha>`，再 `docker compose -f docker-compose.prod.yml up -d`。
+
+---
+
+## 五、后续演进（先留口子，现在不做）
 
 - **React 版**：学完 Vue 后新建 `apps/web-react/`（Next.js），复用 `packages/content` 和同一套 `/api`。
 - **Java 服务**：NestJS 的 DI/Controller/Service 概念和 Spring 同构，将来 `apps/api-java/` 接管 `/api` 下同一批接口即可。
-- **CI/CD**：你提到后面自己搞。当前 `.github/workflows/` 未配置，等仓库推到 GitHub 后可按「push main → build 镜像 → 服务器拉取重启」的流程自己加（GitHub Actions 或腾讯云 CODING 都行）。
+- **构建优化**：目前内容更新会整体重建镜像，后续可加「路径过滤」（只改 web 时跳过 api 构建）+ 依赖清单分层缓存，把部署压到 1 分钟内。
 
-## 五、已知注意事项
+## 六、已知注意事项
 
 - 本机开发环境无 Docker 时，无法起 PostgreSQL，`api` 无法启动、`/project` 和 `/interview` 无数据；`/learning` 不受影响。
 - Prisma 6 会在命令里提示 `package.json#prisma` 字段已废弃（Prisma 7 将移除）；目前可用，后续可迁到 `prisma.config.ts`。
