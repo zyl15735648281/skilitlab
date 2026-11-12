@@ -120,8 +120,24 @@ jobs:
             docker image prune -f >/dev/null
 
             echo "RUNNING 健康检查 $(date "+%F %T")" > "$status"
-            sleep 8
+            http_get() {
+              if command -v curl >/dev/null 2>&1; then
+                curl -fsS -m 5 -o /dev/null "$1"
+              else
+                wget -q -O /dev/null "$1"
+              fi
+            }
+            healthy=0
+            for i in $(seq 1 20); do
+              sleep 3
+              if http_get http://127.0.0.1/api/health; then healthy=1; break; fi
+            done
             docker compose -f docker-compose.prod.yml ps
+            if [ "$healthy" != "1" ]; then
+              echo "❌ /api/health 不通（nginx → api 502？），下面 dump 容器日志："
+              docker compose -f docker-compose.prod.yml logs --tail=60 api web
+              false
+            fi
 
             echo "SUCCESS $(date "+%F %T")" > "$status"
             EOS
@@ -139,7 +155,7 @@ jobs:
                 case "$st" in
                   RUNNING*) echo "… [$((i*10))s] $st"; continue ;;
                   SUCCESS*) echo "✅ $st"; tail -n 25 /tmp/skilitlab-deploy.log; exit 0 ;;
-                  FAILED*)  echo "❌ $st"; tail -n 80 /tmp/skilitlab-deploy.log; exit 1 ;;
+                  FAILED*)  echo "❌ $st"; tail -n 150 /tmp/skilitlab-deploy.log; exit 1 ;;
                 esac
               fi
               echo "… [$((i*10))s] 部署刚启动（首次拉取较慢属正常）"
