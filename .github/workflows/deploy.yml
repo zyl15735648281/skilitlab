@@ -74,6 +74,17 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      # 把「部署要用到的文件」编码好，稍后随 SSH 直接写到服务器，
+      # 这样服务器上的 git 是否同步成功都不影响部署内容（服务器连 github.com 经常很慢/不通）。
+      - name: 打包部署文件
+        id: bundle
+        run: |
+          set -euo pipefail
+          {
+            echo "COMPOSE_B64=$(base64 < docker-compose.prod.yml | tr -d '\n')"
+            echo "NGINX_B64=$(base64 < docker/nginx.conf | tr -d '\n')"
+          } >> "$GITHUB_OUTPUT"
+
       # 关键改动：SSH 只负责「启动部署 + 轮询」，真正的 pull / up 在服务器后台跑。
       # 这样 command_timeout 再也杀不掉部署本身，网络慢只是「等得久」而不是「部署失败」。
       - name: 部署到服务器（后台执行 + 轮询）
@@ -81,28 +92,36 @@ jobs:
         env:
           GHCR_USER: ${{ github.repository_owner }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COMPOSE_B64: ${{ steps.bundle.outputs.COMPOSE_B64 }}
+          NGINX_B64: ${{ steps.bundle.outputs.NGINX_B64 }}
         with:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
           port: ${{ secrets.SERVER_PORT || '22' }}
-          command_timeout: 25m
-          envs: GHCR_USER,GHCR_TOKEN
+          command_timeout: 35m
+          envs: GHCR_USER,GHCR_TOKEN,COMPOSE_B64,NGINX_B64
           script: |
             set -u
             cd "$HOME/skilitlab"
 
-            echo "▶ 同步代码"
-            if git pull --ff-only; then
-              echo "✓ git pull 完成"
-            else
-              echo "⚠️ git pull --ff-only 失败，改用 fetch + reset 到 origin/main（会丢掉服务器上对已跟踪文件的本地修改）"
-              git fetch origin main && git reset --hard FETCH_HEAD
-            fi
+            echo "▶ 服务器现状（磁盘 / docker 占用）"
+            df -h / | tail -1
+            docker system df || true
+
+            echo "▶ 同步代码（best-effort：60 秒超时，失败也不阻塞部署）"
+            timeout 60 git pull --ff-only \
+              || echo "⚠️ git 同步失败或超时，忽略（关键文件下面由 CI 直接写入）"
+
+            echo "▶ 写入本次构建对应的部署文件"
+            mkdir -p docker
+            printf '%s' "$COMPOSE_B64" | base64 -d > docker-compose.prod.yml
+            printf '%s' "$NGINX_B64" | base64 -d > docker/nginx.conf
+            grep -E '^\s+image:' docker-compose.prod.yml
 
             echo "▶ 登录 GHCR"
             printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin \
-              || echo "⚠️ 登录失败；镜像包若是 Public，匿名拉取仍可用"
+              || echo "⚠️ 登录失败；镜像包是 Public，匿名拉取仍可用"
 
             # 真正的部署脚本：后台跑，SSH 断掉也照常完成
             cat > /tmp/skilitlab-deploy.sh <<'EOS'
@@ -147,8 +166,8 @@ jobs:
             nohup bash /tmp/skilitlab-deploy.sh >> /tmp/skilitlab-deploy.log 2>&1 &
             echo "▶ 服务器后台已启动部署（PID $!），日志：/tmp/skilitlab-deploy.log"
 
-            # 轮询最多 15 分钟：完成就报真实结果；没完成也不判失败（后台还在继续）
-            for i in $(seq 1 90); do
+            # 轮询最多 25 分钟：完成就报真实结果；没完成也不判失败（后台还在继续）
+            for i in $(seq 1 150); do
               sleep 10
               if [ -f /tmp/skilitlab-deploy.status ]; then
                 st=$(cat /tmp/skilitlab-deploy.status)
@@ -158,9 +177,9 @@ jobs:
                   FAILED*)  echo "❌ $st"; tail -n 150 /tmp/skilitlab-deploy.log; exit 1 ;;
                 esac
               fi
-              echo "… [$((i*10))s] 部署刚启动（首次拉取较慢属正常）"
+              echo "… [$((i*10))s] 部署还在进行（拉取慢属正常）"
             done
 
-            echo "::warning::15 分钟内未完成，部署仍在服务器后台继续；稍后 ssh 上看 /tmp/skilitlab-deploy.log"
+            echo "::warning::25 分钟内未完成，部署仍在服务器后台继续；稍后 ssh 上看 /tmp/skilitlab-deploy.log"
             tail -n 40 /tmp/skilitlab-deploy.log || true
             exit 0
