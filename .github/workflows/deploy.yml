@@ -9,6 +9,10 @@ env:
   REGISTRY: ghcr.io
   API_IMAGE: ghcr.io/${{ github.repository_owner }}/skilitlab-api
   WEB_IMAGE: ghcr.io/${{ github.repository_owner }}/skilitlab-web
+  # postgres / nginx 官方镜像在 Docker Hub，国内服务器基本拉不动（实测 TCP 都连不上），
+  # 所以 CI 里顺手复制一份到 GHCR，服务器只认 ghcr.io。
+  PG_IMAGE: ghcr.io/${{ github.repository_owner }}/skilitlab-postgres
+  NGINX_IMAGE: ghcr.io/${{ github.repository_owner }}/skilitlab-nginx
 
 jobs:
   build-and-deploy:
@@ -30,6 +34,21 @@ jobs:
 
       - name: 设置 Buildx
         uses: docker/setup-buildx-action@v3
+
+      # 只搬「固定版本」的两个基础镜像；已存在就跳过，不重复上传。
+      - name: 搬运 postgres / nginx 到 GHCR
+        run: |
+          set -euo pipefail
+          for pair in "postgres:16-alpine|${PG_IMAGE}:16-alpine" "nginx:1.27-alpine|${NGINX_IMAGE}:1.27-alpine"; do
+            src="${pair%%|*}"
+            dst="${pair##*|}"
+            if docker buildx imagetools inspect "$dst" >/dev/null 2>&1; then
+              echo "✓ 已存在，跳过：$dst"
+            else
+              echo "→ 复制 $src => $dst"
+              docker buildx imagetools create --tag "$dst" "$src"
+            fi
+          done
 
       - name: 构建并推送 API 镜像
         uses: docker/build-push-action@v6
@@ -55,19 +74,77 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: 部署到服务器
+      # 关键改动：SSH 只负责「启动部署 + 轮询」，真正的 pull / up 在服务器后台跑。
+      # 这样 command_timeout 再也杀不掉部署本身，网络慢只是「等得久」而不是「部署失败」。
+      - name: 部署到服务器（后台执行 + 轮询）
         uses: appleboy/ssh-action@v1
+        env:
+          GHCR_USER: ${{ github.repository_owner }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           host: ${{ secrets.SERVER_HOST }}
           username: ${{ secrets.SERVER_USER }}
           key: ${{ secrets.SERVER_SSH_KEY }}
           port: ${{ secrets.SERVER_PORT || '22' }}
-          command_timeout: 40m
+          command_timeout: 25m
+          envs: GHCR_USER,GHCR_TOKEN
           script: |
-            set -e
+            set -u
             cd "$HOME/skilitlab"
-            git pull --ff-only || echo "⚠️ git pull 失败（忽略，镜像拉取才是关键）"
+
+            echo "▶ 同步代码"
+            if git pull --ff-only; then
+              echo "✓ git pull 完成"
+            else
+              echo "⚠️ git pull --ff-only 失败，改用 fetch + reset 到 origin/main（会丢掉服务器上对已跟踪文件的本地修改）"
+              git fetch origin main && git reset --hard FETCH_HEAD
+            fi
+
+            echo "▶ 登录 GHCR"
+            printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin \
+              || echo "⚠️ 登录失败；镜像包若是 Public，匿名拉取仍可用"
+
+            # 真正的部署脚本：后台跑，SSH 断掉也照常完成
+            cat > /tmp/skilitlab-deploy.sh <<'EOS'
+            #!/usr/bin/env bash
+            set -euo pipefail
+            cd "$HOME/skilitlab"
+            status=/tmp/skilitlab-deploy.status
+            trap 'echo "FAILED $(date "+%F %T") 第 $LINENO 行" > "$status"' ERR
+
+            echo "RUNNING 拉取镜像 $(date "+%F %T")" > "$status"
             docker compose -f docker-compose.prod.yml pull
+
+            echo "RUNNING 启动容器 $(date "+%F %T")" > "$status"
             docker compose -f docker-compose.prod.yml up -d --remove-orphans
-            docker image prune -f
-            echo "✅ 部署完成"
+            docker image prune -f >/dev/null
+
+            echo "RUNNING 健康检查 $(date "+%F %T")" > "$status"
+            sleep 8
+            docker compose -f docker-compose.prod.yml ps
+
+            echo "SUCCESS $(date "+%F %T")" > "$status"
+            EOS
+
+            rm -f /tmp/skilitlab-deploy.status
+            : > /tmp/skilitlab-deploy.log
+            nohup bash /tmp/skilitlab-deploy.sh >> /tmp/skilitlab-deploy.log 2>&1 &
+            echo "▶ 服务器后台已启动部署（PID $!），日志：/tmp/skilitlab-deploy.log"
+
+            # 轮询最多 15 分钟：完成就报真实结果；没完成也不判失败（后台还在继续）
+            for i in $(seq 1 90); do
+              sleep 10
+              if [ -f /tmp/skilitlab-deploy.status ]; then
+                st=$(cat /tmp/skilitlab-deploy.status)
+                case "$st" in
+                  RUNNING*) echo "… [$((i*10))s] $st"; continue ;;
+                  SUCCESS*) echo "✅ $st"; tail -n 25 /tmp/skilitlab-deploy.log; exit 0 ;;
+                  FAILED*)  echo "❌ $st"; tail -n 80 /tmp/skilitlab-deploy.log; exit 1 ;;
+                esac
+              fi
+              echo "… [$((i*10))s] 部署刚启动（首次拉取较慢属正常）"
+            done
+
+            echo "::warning::15 分钟内未完成，部署仍在服务器后台继续；稍后 ssh 上看 /tmp/skilitlab-deploy.log"
+            tail -n 40 /tmp/skilitlab-deploy.log || true
+            exit 0

@@ -56,7 +56,7 @@ cp apps/api/.env.example apps/api/.env
 docker compose up -d postgres
 
 # 4. 建表 + 灌入示例数据
-pnpm prisma:migrate    # 首次会提示给迁移命名，回车即可
+pnpm prisma:migrate    # 应用仓库里已有的 0_init 迁移；只有改了 schema 才会提示命名
 pnpm prisma:seed
 
 # 5. 同时起前后端（web :3000，api :3001）
@@ -180,15 +180,17 @@ push main → GitHub Actions 构建镜像（web + api）→ 推送到 GHCR → S
    | `SERVER_SSH_KEY` | 上一步的私钥内容（整段粘贴） |
    | `SERVER_PORT` | 可选，默认 22 |
 
-3. **让服务器能拉 GHCR 镜像**（二选一）：
-   - **推荐：镜像设公开**。GitHub → 头像 → Packages → 找到 `skilitlab-api` 和 `skilitlab-web` → Package settings → Change visibility → Public。之后 `docker pull` 无需登录。
-   - 或**保持私有**：在服务器上一次性登录 `docker login ghcr.io -u <你的用户名>`，输入带 `read:packages` 权限的 PAT。
+3. **让服务器能拉 GHCR 镜像**：基本不用手动做什么。
+   - CI 每次部署都会用本次运行的 `GITHUB_TOKEN` 在服务器上执行 `docker login ghcr.io`，所以包是私有的也能拉。
+   - 服务器**不需要**访问 Docker Hub：`postgres:16-alpine` / `nginx:1.27-alpine` 由 CI 复制成 `ghcr.io/<owner>/skilitlab-postgres:16-alpine` 和 `skilitlab-nginx:1.27-alpine`（国内访问 Docker Hub 基本不通，一拉就卡死）。
+   - 想更省事也可以把四个包都设为 Public：头像 → Packages → 对应包 → Package settings → Change visibility。
 
 4. **服务器首次部署**（等第一次 CI 跑完、镜像已生成后执行）：
    ```bash
    git clone git@github.com:<你>/skilitlab.git ~/skilitlab
    cd ~/skilitlab
    cp .env.example .env && vim .env    # 改 POSTGRES_PASSWORD、GITHUB_OWNER（小写）
+   docker compose -f docker-compose.prod.yml pull     # 四个镜像全部来自 ghcr.io
    docker compose -f docker-compose.prod.yml up -d
    docker compose -f docker-compose.prod.yml exec api pnpm prisma:seed   # 灌示例数据
    ```
@@ -203,11 +205,27 @@ git add -A && git commit -m "note: 新增 xxx 笔记" && git push
 
 GitHub Actions 自动构建 → 推送镜像 → 服务器自动 pull + 重启。等 2–4 分钟，刷新 `https://www.skilitlab.top/learning` 即见新内容。
 
+> **部署不再被 SSH 超时杀掉**：CI 只负责在服务器上「后台启动部署」再轮询状态（最多 15 分钟）。
+> 网络慢导致 15 分钟内没拉完时，只会标一个 ⚠️ 警告，**后台会继续跑完**，不会半路被切断。
+> 想看进度：`ssh <服务器> 'cat /tmp/skilitlab-deploy.status; tail -f /tmp/skilitlab-deploy.log'`
+
 > 也可以直接在 GitHub 网页上改 markdown 文件并 commit，同样触发部署，连终端都不用开。
 
 ### 4.3 回滚
 
 CI 会同时打 `:latest` 和 `:<commit-sha>` 两个 tag。要回滚：把 [docker-compose.prod.yml](./docker-compose.prod.yml) 里 `:latest` 临时改成某个 `:<sha>`，再 `docker compose -f docker-compose.prod.yml up -d`。
+
+（`skilitlab-postgres` / `skilitlab-nginx` 是固定版本 tag，不随提交变化。）
+
+### 4.4 排障
+
+- **`Run Command Timeout` + `Process completed with exit code 1`**：这是「部署到服务器」这一步的 SSH 会话超时，**不是**构建或代码错误。旧版工作流里 SSH 会一直持有整个 `docker compose pull`，网络一慢就被切断。现在的写法把部署丢到服务器后台，SSH 只负责启动 + 轮询。
+- **pull 卡住不动**：先看 compose 里的镜像地址是不是 Docker Hub。国内服务器访问 `registry-1.docker.io` / `auth.docker.io` 基本不通（TCP 都连不上），docker 会无限重试，加多长的超时都没用：
+  ```bash
+  curl -m 10 -o /dev/null -w '%{http_code}\n' https://registry-1.docker.io/v2/   # 无输出 = 不通
+  curl -m 10 -o /dev/null -w '%{http_code}\n' https://ghcr.io/v2/                # 401 = 正常
+  ```
+- **再加一层保险**：给服务器 docker 配镜像加速或代理（`/etc/docker/daemon.json` 的 `registry-mirrors`，或给 dockerd 设 `HTTPS_PROXY`）。
 
 ---
 

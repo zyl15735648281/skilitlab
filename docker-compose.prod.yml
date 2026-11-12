@@ -1,10 +1,14 @@
-# 生产部署用 compose：镜像由 CI 构建推送到 GHCR，服务器只负责 pull + 启动。
+# 生产部署用 compose：镜像由 CI 构建（或搬运）到 GHCR，服务器只负责 pull + 启动。
 # 用法：docker compose -f docker-compose.prod.yml up -d
 # 需在 .env 里设置 GITHUB_OWNER（你的 GitHub 用户名，小写）和 POSTGRES_PASSWORD。
+#
+# 注意：这里四个镜像全部来自 ghcr.io，一个都不来自 Docker Hub。
+# 原因：国内服务器访问 registry-1.docker.io / auth.docker.io 基本不通，pull 会无限重试卡住。
+# postgres / nginx 的官方镜像是 CI 用 `docker buildx imagetools create` 从 Docker Hub 复制过来的。
 
 services:
   postgres:
-    image: postgres:16-alpine
+    image: ghcr.io/${GITHUB_OWNER}/skilitlab-postgres:16-alpine
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-skilitlab}
@@ -43,7 +47,7 @@ services:
       - "3000"
 
   nginx:
-    image: nginx:1.27-alpine
+    image: ghcr.io/${GITHUB_OWNER}/skilitlab-nginx:1.27-alpine
     restart: unless-stopped
     ports:
       - "80:80"
